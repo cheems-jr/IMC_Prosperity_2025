@@ -1,0 +1,17 @@
+# Python cache (works at any directory level)
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+
+# Backtests (works for any subdirectory like 'round1/backtests/')
+**/backtests/
+**/*.backtest
+**/*.log
+
+# IDE/OS files (optional)
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+venv/
