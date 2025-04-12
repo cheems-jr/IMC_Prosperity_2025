@@ -165,7 +165,8 @@ DEFAULT_PRICES = {
     PICNIC_BASKET2: 30408
 }
 
-
+lookback_std_dev_pb1 = 10
+lookback_ema_pb1 = 20
 
 class Trader:
     #@TODO: instead of VWAP, try using EMA for KELP's fair price -> calculate the EMA based on P_t and EMA_{t-1}
@@ -184,6 +185,11 @@ class Trader:
                 'ema_20' : None,
                 'ema_5' : None
             }
+        
+        self.pb1_ema = []
+        self.pb1_diffs = []
+        #initialize std dev at high value s.t. initial timestamp does not lead to uninformed trades
+        self.pb1_std_dev = 100
 
         self.ema_param = 0.5
 
@@ -325,7 +331,7 @@ class Trader:
         
     def update_ema_prices(self, state : TradingState):
         """
-        Update the exponential moving average of the prices of each product.
+        Update the exponential movitng average of the prices of each product.
         """
         for product in PRODUCTS[1:]:
             mid_price = self.get_mid_price(product, state)
@@ -347,6 +353,34 @@ class Trader:
             else:
                 self.ema_prices[product]['ema_20'] = (alpha_20 * mid_price + 
                                                     (1 - alpha_20) * self.ema_prices[product]['ema_20'])
+                
+    def get_pb1_diff(self, state: TradingState):
+        
+        mid_price_pb1 = self.get_mid_price(PICNIC_BASKET1, state)
+        mid_price_indiv = 6*self.get_mid_price(CROISSANTS, state) + 3*self.get_mid_price(JAMS, state) + self.get_mid_price(DJEMBES, state)
+
+        return mid_price_pb1 - mid_price_indiv
+    
+    def update_pb1_params(self, state: TradingState):
+
+        alpha_pb1 = 2 / (lookback_ema_pb1 + 1)
+
+        self.pb1_diffs.append(self.get_pb1_diff(state))
+
+        if self.pb1_ema == []:
+            self.pb1_ema.append(self.pb1_diffs[-1])
+
+        else:
+            self.pb1_ema.append(alpha_pb1 * self.pb1_diffs[-1] + (1-alpha_pb1) * self.pb1_ema[-1])
+        
+        if len(self.pb1_diffs) > lookback_std_dev_pb1:
+            self.pb1_diffs.pop(0)
+
+        if len(self.pb1_ema) > lookback_std_dev_pb1:
+            self.pb1_ema.pop(0)
+        
+        if len(self.pb1_ema) >= 2 and len(self.pb1_diffs) >= 2:
+            self.pb1_std_dev = statistics.stdev(np.array(self.pb1_diffs, dtype=float) - np.array(self.pb1_ema, dtype=float))
 
     def kelp_strategy(self, state : TradingState):
         """
@@ -488,6 +522,81 @@ class Trader:
         
         orders: List[Order] = []
 
+        self.update_pb1_params(state)
+        
+        diff_actual = self.get_pb1_diff(state)
+
+        order_depth_pb1 = state.order_depths.get(PICNIC_BASKET1, OrderDepth({}, {}))
+        best_bid_pb1 = max(order_depth_pb1.buy_orders.keys()) if order_depth_pb1.buy_orders else None
+        best_ask_pb1 = min(order_depth_pb1.sell_orders.keys()) if order_depth_pb1.sell_orders else None
+
+        order_depth_cr = state.order_depths.get(CROISSANTS, OrderDepth({}, {}))
+        best_bid_cr = max(order_depth_cr.buy_orders.keys()) if order_depth_cr.buy_orders else None
+        best_ask_cr = min(order_depth_cr.sell_orders.keys()) if order_depth_cr.sell_orders else None
+
+        order_depth_jams = state.order_depths.get(JAMS, OrderDepth({}, {}))
+        best_bid_jams = max(order_depth_jams.buy_orders.keys()) if order_depth_jams.buy_orders else None
+        best_ask_jams = min(order_depth_jams.sell_orders.keys()) if order_depth_jams.sell_orders else None
+
+        order_depth_dje = state.order_depths.get(DJEMBES, OrderDepth({}, {}))
+        best_bid_dje = max(order_depth_dje.buy_orders.keys()) if order_depth_dje.buy_orders else None
+        best_ask_dje = min(order_depth_dje.sell_orders.keys()) if order_depth_dje.sell_orders else None
+
+        #basket overvalued -> short basket, long on individuals
+        if self.pb1_std_dev is not None and (diff_actual - self.pb1_ema[-1]) > 4.5 * self.pb1_std_dev:
+            logger.print(f"Basket short-regime, diff-EMA {diff_actual}-{self.pb1_ema[-1]} > 4.5 * {self.pb1_std_dev}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the order book?
+            pkg_amt_indiv = min(-math.floor(order_depth_cr.sell_orders[best_ask_cr]/6), -math.floor(order_depth_jams.sell_orders[best_ask_jams]/3), -order_depth_dje.sell_orders[best_ask_dje], order_depth_pb1.buy_orders[best_bid_pb1])
+            logger.print(f"Initial pkg_amt_indiv: {pkg_amt_indiv}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the current positions and limits?
+            #if (pkg_amt_indiv + self.get_position(PICNIC_BASKET1, state)) > self.position_limit[PICNIC_BASKET1]:
+                #pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET1] - self.get_position(PICNIC_BASKET1, state)))
+            if (6*pkg_amt_indiv + self.get_position(CROISSANTS, state)) > self.position_limit[CROISSANTS]:
+                pkg_amt_indiv = math.floor((self.position_limit[CROISSANTS] - self.get_position(CROISSANTS, state))/6)
+            if (3*pkg_amt_indiv + self.get_position(JAMS, state)) > self.position_limit[JAMS]:
+                pkg_amt_indiv = math.floor((self.position_limit[JAMS] - self.get_position(JAMS, state))/3)
+            if (pkg_amt_indiv + self.get_position(DJEMBES, state)) > self.position_limit[DJEMBES]:
+                pkg_amt_indiv = math.floor(self.position_limit[DJEMBES] - self.get_position(DJEMBES, state))
+            logger.print(f"Final pkg_amt_indiv: {pkg_amt_indiv}")
+
+            orders.append(Order(PICNIC_BASKET1, best_bid_pb1, -pkg_amt_indiv))
+            logger.print(f"Going short on PB1 with order {orders[-1]}")
+            orders.append(Order(CROISSANTS, best_ask_cr, 6*pkg_amt_indiv))
+            logger.print(f"Going long on CR with order {orders[-1]}")
+            orders.append(Order(JAMS, best_ask_jams, 3*pkg_amt_indiv))
+            logger.print(f"Going long on JAMS with order {orders[-1]}")
+            orders.append(Order(DJEMBES, best_ask_dje, pkg_amt_indiv))
+            logger.print(f"Going long on DJE with order {orders[-1]}")
+
+        if self.pb1_std_dev is not None and (diff_actual - self.pb1_ema[-1]) < -4.5 * self.pb1_std_dev:
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the order book?
+            pkg_amt_indiv = min(math.floor(order_depth_cr.buy_orders[best_bid_cr]/6), math.floor(order_depth_jams.buy_orders[best_bid_jams]/3), order_depth_dje.buy_orders[best_bid_dje], -order_depth_pb1.sell_orders[best_ask_pb1])
+            logger.print(f"Initial pkg_amt_indiv: {pkg_amt_indiv}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the current positions and limits?
+            #if (-pkg_amt_indiv + self.get_position(PICNIC_BASKET1, state)) < -self.position_limit[PICNIC_BASKET1]:
+                #pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET1] - self.get_position(PICNIC_BASKET1, state)))
+            if -6*pkg_amt_indiv + self.get_position(CROISSANTS, state) < -self.position_limit[CROISSANTS]:
+                pkg_amt_indiv = math.floor((self.position_limit[CROISSANTS] - self.get_position(CROISSANTS, state))/6)
+            logger.print(f"pkg_amt_indiv after if-1: {pkg_amt_indiv}")
+            if -3*pkg_amt_indiv + self.get_position(JAMS, state) < -self.position_limit[JAMS]:
+                pkg_amt_indiv = math.floor((self.position_limit[JAMS] - self.get_position(JAMS, state))/3)
+            logger.print(f"pkg_amt_indiv after if-2: {pkg_amt_indiv}")
+            if -pkg_amt_indiv + self.get_position(DJEMBES, state) < -self.position_limit[DJEMBES]:
+                pkg_amt_indiv = math.floor(self.position_limit[DJEMBES] - self.get_position(DJEMBES, state))
+            logger.print(f"Final pkg_amt_indiv: {pkg_amt_indiv}")
+
+            orders.append(Order(PICNIC_BASKET1, best_ask_pb1, pkg_amt_indiv))
+            logger.print(f"Going long on PB1 with order {orders[-1]}")
+            orders.append(Order(CROISSANTS, best_bid_cr, -6*pkg_amt_indiv))
+            logger.print(f"Going short on CR with order {orders[-1]}")
+            orders.append(Order(JAMS, best_bid_cr, -3*pkg_amt_indiv))
+            logger.print(f"Going short on JAMS with order {orders[-1]}")
+            orders.append(Order(DJEMBES, best_bid_cr, -pkg_amt_indiv))
+            logger.print(f"Going short on DJE with order {orders[-1]}")
+
+
+
+        """
         #calculate the mid price difference between basket 1 and its constituents
         delta_pb1_indiv = self.get_mid_price(PICNIC_BASKET1, state) - (6*self.get_mid_price(CROISSANTS, state) + 3*self.get_mid_price(JAMS, state) + self.get_mid_price(DJEMBES, state))
 
@@ -508,13 +617,13 @@ class Trader:
         best_ask_dje = min(order_depth_dje.sell_orders.keys()) if order_depth_dje.sell_orders else None
 
         logger.print(f"Current delta: {delta_pb1_indiv}")
-        """if delta_pb1_indiv > 50+49:
-            logger.print(f"CR - sell order depth: {order_depth_cr.sell_orders}, best ask: {best_ask_cr}")
-            logger.print(f"CR - # of sell orders @ best_ask: {order_depth_cr.sell_orders[best_ask_cr]}")
-            logger.print(f"JAMS - sell order depth: {order_depth_jams.sell_orders}, best ask: {best_ask_jams}")
-            logger.print(f"JAMS - # of sell orders @ best_ask: {order_depth_jams.sell_orders[best_ask_jams]}")
-            logger.print(f"DJE - sell order depth: {order_depth_dje.sell_orders}, best ask: {best_ask_dje}")
-            logger.print(f"DJE - # of sell orders @ best_ask: {order_depth_dje.sell_orders[best_ask_dje]}")"""
+        #if delta_pb1_indiv > 50+49:
+            #logger.print(f"CR - sell order depth: {order_depth_cr.sell_orders}, best ask: {best_ask_cr}")
+            #logger.print(f"CR - # of sell orders @ best_ask: {order_depth_cr.sell_orders[best_ask_cr]}")
+            #logger.print(f"JAMS - sell order depth: {order_depth_jams.sell_orders}, best ask: {best_ask_jams}")
+            #logger.print(f"JAMS - # of sell orders @ best_ask: {order_depth_jams.sell_orders[best_ask_jams]}")
+            #logger.print(f"DJE - sell order depth: {order_depth_dje.sell_orders}, best ask: {best_ask_dje}")
+            #logger.print(f"DJE - # of sell orders @ best_ask: {order_depth_dje.sell_orders[best_ask_dje]}")
 
         if delta_pb1_indiv < -50+49:
             logger.print(f"CR - buy order depth: {order_depth_cr.buy_orders}, best bid: {best_bid_cr}")
@@ -605,7 +714,7 @@ class Trader:
                 orders.append(Order(DJEMBES, best_bid_cr, -self.get_position(DJEMBES, state)))
             elif self.get_position(DJEMBES, state) < 0:
                 orders.append(Order(DJEMBES, best_ask_cr, self.get_position(DJEMBES, state)))
-
+            """
 
         logger.print(f"Returning orders: {orders}") 
         return orders
@@ -748,7 +857,7 @@ class Trader:
             result[KELP] = kelp_orders"""
 
         
-        traderData = jsonpickle.encode( {"squid_ink_vwap": self.vwap_history} )
+        traderData = jsonpickle.encode( {"pb1_ema": self.pb1_ema, "pb1_std_dev": self.pb1_std_dev} )
         #jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap })
 
 
