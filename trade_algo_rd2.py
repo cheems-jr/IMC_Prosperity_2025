@@ -169,10 +169,14 @@ lookback_std_dev_pb1 = 10
 lookback_ema_pb1 = 20
 lookback_std_dev_pb2 = 10
 lookback_ema_pb2 = 20
+lookback_std_dev_bb = 10
+lookback_ema_bb = 20
 z_threshold = 7
 z_threshold_2 = 5
+z_threshold_bb = 5
 spread_mean = 49
 spread_mean_p2 = 25
+spread_mean_bb = 25
 
 class Trader:
     #@TODO: instead of VWAP, try using EMA for KELP's fair price -> calculate the EMA based on P_t and EMA_{t-1}
@@ -200,6 +204,10 @@ class Trader:
         self.pb2_ema = []
         self.pb2_diffs= []
         self.pb2_std_dev = 100
+
+        self.bb_ema = []
+        self.bb_diffs= []
+        self.bb_std_dev = 100
 
         self.ema_param = 0.5
 
@@ -843,7 +851,6 @@ class Trader:
     def update_pb2_params(self, state: TradingState):
 
         alpha_pb2 = 2 / (lookback_ema_pb2 + 1)
-
         self.pb2_diffs.append(self.get_pb2_diff(state))
 
         if self.pb2_ema == []:
@@ -898,6 +905,138 @@ class Trader:
         mid_price_indiv = 4*self.get_mid_price(CROISSANTS, state) + 2*self.get_mid_price(JAMS, state)
 
         return mid_price_pb2 - mid_price_indiv
+
+    def basket_basket_strategy(self, state: TradingState):
+        
+        orders: List[Order] = []
+
+        self.update_bb_params(state)
+        
+        spread = self.get_bb_diff(state)
+
+        order_depth_pb1 = state.order_depths.get(PICNIC_BASKET1, OrderDepth({}, {}))
+        best_bid_pb1 = max(order_depth_pb1.buy_orders.keys()) if order_depth_pb1.buy_orders else None
+        best_ask_pb1 = min(order_depth_pb1.sell_orders.keys()) if order_depth_pb1.sell_orders else None
+
+        order_depth_pb2 = state.order_depths.get(PICNIC_BASKET2, OrderDepth({}, {}))
+        best_bid_pb2 = max(order_depth_pb2.buy_orders.keys()) if order_depth_pb2.buy_orders else None
+        best_ask_pb2 = min(order_depth_pb2.sell_orders.keys()) if order_depth_pb2.sell_orders else None
+
+        order_depth_djembes = state.order_depths.get(DJEMBES, OrderDepth({}, {}))
+        best_bid_djembes = max(order_depth_djembes.buy_orders.keys()) if order_depth_djembes.buy_orders else None
+        best_ask_djembes = min(order_depth_djembes.sell_orders.keys()) if order_depth_djembes.sell_orders else None
+
+        if self.bb_std_dev == 0:
+            return []
+        
+        z_score = (spread - spread_mean_bb) / self.bb_std_dev
+
+
+        #basket overvalued -> short basket, long on individuals
+        #if self.pb1_std_dev is not None and (diff_actual - self.pb1_ema[-1]) > 4.5 * self.pb1_std_dev:
+        if z_score >= z_threshold_bb:
+            logger.print(f"Basket short-regime, diff-EMA {spread}-{self.bb_ema[-1]} > 4.5 * {self.bb_std_dev}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the order book?
+            pkg_amt_indiv = min(-math.floor(order_depth_pb2.sell_orders[best_ask_pb2]/2), -math.floor(order_depth_djembes.sell_orders[best_ask_djembes]/2), order_depth_pb1.buy_orders[best_bid_pb1])
+            logger.print(f"Initial pkg_amt_indiv: {pkg_amt_indiv}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the current positions and limits?
+            #if (pkg_amt_indiv + self.get_position(PICNIC_BASKET1, state)) > self.position_limit[PICNIC_BASKET1]:
+                #pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET1] - self.get_position(PICNIC_BASKET1, state)))
+            if (4*pkg_amt_indiv + self.get_position(PICNIC_BASKET2, state)) > self.position_limit[PICNIC_BASKET2]:
+                pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET2] - self.get_position(PICNIC_BASKET2, state))/2)
+            if (2*pkg_amt_indiv + self.get_position(DJEMBES, state)) > self.position_limit[DJEMBES]:
+                pkg_amt_indiv = math.floor((self.position_limit[DJEMBES] - self.get_position(DJEMBES, state))/2)
+            logger.print(f"Final pkg_amt_indiv: {pkg_amt_indiv}")
+
+            orders.append(Order(PICNIC_BASKET1, best_bid_pb1, -pkg_amt_indiv))
+            logger.print(f"Going short on PB1 with order {orders[-1]}")
+            orders.append(Order(PICNIC_BASKET2, best_ask_pb2, 2*pkg_amt_indiv))
+            logger.print(f"Going long on CR with order {orders[-1]}")
+            orders.append(Order(DJEMBES, best_ask_djembes, 2*pkg_amt_indiv))
+            logger.print(f"Going long on JAMS with order {orders[-1]}")
+
+        #if self.pb1_std_dev is not None and (diff_actual - self.pb1_ema[-1]) < -4.5 * self.pb1_std_dev:
+        if z_score <= z_threshold_bb:
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the order book?
+            pkg_amt_indiv = min(math.floor(order_depth_pb2.buy_orders[best_bid_pb2]/2), math.floor(order_depth_djembes.buy_orders[best_bid_djembes]/2), -order_depth_pb1.sell_orders[best_ask_pb1])
+            logger.print(f"Initial pkg_amt_indiv: {pkg_amt_indiv}")
+            #what is the lower limit to how many 6-3-1 splits we can buy based on the current positions and limits?
+            #if (-pkg_amt_indiv + self.get_position(PICNIC_BASKET1, state)) < -self.position_limit[PICNIC_BASKET1]:
+                #pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET1] - self.get_position(PICNIC_BASKET1, state)))
+            if -2*pkg_amt_indiv + self.get_position(PICNIC_BASKET2, state) < -self.position_limit[PICNIC_BASKET2]:
+                pkg_amt_indiv = math.floor((self.position_limit[PICNIC_BASKET2] - self.get_position(PICNIC_BASKET2, state))/2)
+            logger.print(f"pkg_amt_indiv after if-1: {pkg_amt_indiv}")
+            if -2*pkg_amt_indiv + self.get_position(DJEMBES, state) < -self.position_limit[DJEMBES]:
+                pkg_amt_indiv = math.floor((self.position_limit[DJEMBES] - self.get_position(DJEMBES, state))/2)
+            logger.print(f"pkg_amt_indiv after if-2: {pkg_amt_indiv}")
+
+            orders.append(Order(PICNIC_BASKET1, best_ask_pb1, pkg_amt_indiv))
+            logger.print(f"Going long on PB1 with order {orders[-1]}")
+            orders.append(Order(PICNIC_BASKET2, best_bid_pb2, -2*pkg_amt_indiv))
+            logger.print(f"Going short on CR with order {orders[-1]}")
+            orders.append(Order(JAMS, best_bid_djembes, -2*pkg_amt_indiv))
+            logger.print(f"Going short on JAMS with order {orders[-1]}")
+
+        logger.print(f"Returning orders: {orders}") 
+        return orders
+    
+    def update_bb_params(self, state: TradingState):
+
+        alpha_bb = 2 / (lookback_ema_bb + 1)
+        self.bb_diffs.append(self.get_bb_diff(state))
+
+        if self.bb_ema == []:
+            self.bb_ema.append(self.bb_diffs[-1])
+
+        else:
+            self.bb_ema.append(alpha_bb * self.bb_diffs[-1] + (1-alpha_bb) * self.bb_ema[-1])
+        
+        if len(self.bb_diffs) > lookback_std_dev_bb:
+            self.bb_diffs.pop(0)
+
+        if len(self.bb_ema) > lookback_ema_bb:
+            self.bb_ema.pop(0)
+        
+        if len(self.bb_ema) >= 2 and len(self.bb_diffs) >= 2:
+            self.bb_std_dev = statistics.stdev(np.array(self.bb_diffs, dtype=float) - np.array(self.bb_ema, dtype=float)[-10:])
+
+    
+
+    def get_bb_diff(self, state: TradingState):
+        '''#picnic basket 1
+        best_bid = max(state.order_depths[PICNIC_BASKET1].buy_orders)
+        best_ask = min(state.order_depths[PICNIC_BASKET1].sell_orders)
+        best_bid_vol = abs(state.order_depths[PICNIC_BASKET1].buy_orders[best_bid])
+        best_ask_vol = abs(state.order_depths[PICNIC_BASKET1].sell_orders[best_ask])
+        mid_price_pb1 = (best_bid * best_ask_vol + best_ask * best_bid_vol) / (best_bid_vol + best_ask_vol)
+
+        #croissants
+        best_bid_croissants = max(state.order_depths[CROISSANTS].buy_orders)
+        best_ask_croissants = min(state.order_depths[CROISSANTS].sell_orders)
+        best_bid_vol_croissants = abs(state.order_depths[CROISSANTS].buy_orders[best_bid_croissants])
+        best_ask_vol_croissants = abs(state.order_depths[CROISSANTS].sell_orders[best_ask_croissants])
+        mid_price_croissants = (best_bid_croissants * best_ask_vol_croissants + best_ask_croissants * best_bid_vol_croissants) / (best_bid_vol_croissants + best_ask_vol_croissants)
+
+        #jams
+        best_bid_jams = max(state.order_depths[JAMS].buy_orders)
+        best_ask_jams = min(state.order_depths[JAMS].sell_orders)
+        best_bid_vol_jams = abs(state.order_depths[JAMS].buy_orders[best_bid_jams])
+        best_ask_vol_jams = abs(state.order_depths[JAMS].sell_orders[best_ask_jams])
+        mid_price_jams = (best_bid_jams * best_ask_vol_jams + best_ask_jams * best_bid_vol_jams) / (best_bid_vol_jams + best_ask_vol_jams)
+
+        #djembes
+        best_bid_djembes = max(state.order_depths[DJEMBES].buy_orders)
+        best_ask_djembes = min(state.order_depths[DJEMBES].sell_orders)
+        best_bid_vol_djembes = abs(state.order_depths[DJEMBES].buy_orders[best_bid_djembes])
+        best_ask_vol_djembes = abs(state.order_depths[DJEMBES].sell_orders[best_ask_djembes])
+        mid_price_djembes = (best_bid_djembes * best_ask_vol_djembes + best_ask_djembes * best_bid_vol_djembes) / (best_bid_vol_djembes + best_ask_vol_djembes)
+
+        synth_mid = 6 * mid_price_croissants + 3 * mid_price_jams + mid_price_djembes
+        return mid_price_pb1 - synth_mid'''
+        mid_price_pb1 = self.get_mid_price(PICNIC_BASKET1, state)
+        mid_price_indiv = 2*self.get_mid_price(PICNIC_BASKET2, state) + 2*self.get_mid_price(DJEMBES, state)
+
+        return mid_price_pb1 - mid_price_indiv
 
     """
     def kelp_orders(self, order_depth: OrderDepth, timespan:int, width: float, kelp_take_width: float, position: int, position_limit: int) -> List[Order]:
@@ -1025,8 +1164,9 @@ class Trader:
             print(e)"""
 
         
-        result[PICNIC_BASKET1] = self.basket_1_strategy(state)
-        result[PICNIC_BASKET2] = self.basket_2_strategy(state)
+        '''result[PICNIC_BASKET1] = self.basket_1_strategy(state)
+        result[PICNIC_BASKET2] = self.basket_2_strategy(state)'''
+        result[PICNIC_BASKET1] = self.basket_basket_strategy(state)
 
         """
         if KELP in state.order_depths:
@@ -1038,6 +1178,8 @@ class Trader:
         
         traderData = jsonpickle.encode( {"pb1_ema": self.pb1_ema, "pb1_std_dev": self.pb1_std_dev} )
         traderData = jsonpickle.encode( {"pb2_ema": self.pb2_ema, "pb2_std_dev": self.pb2_std_dev} )
+        traderData = jsonpickle.encode( {"bb_ema": self.bb_ema, "bb_std_dev": self.bb_std_dev} )
+
 
         #jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap })
 
