@@ -134,6 +134,74 @@ logger = Logger()
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
+from math import log, sqrt, exp
+from statistics import NormalDist
+class BlackScholes:
+    @staticmethod
+    def black_scholes_call(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        d2 = d1 - volatility * sqrt(time_to_expiry)
+        call_price = spot * NormalDist().cdf(d1) - strike * NormalDist().cdf(d2)
+        return call_price
+
+    @staticmethod
+    def black_scholes_put(spot, strike, time_to_expiry, volatility):
+        d1 = (log(spot / strike) + (0.5 * volatility * volatility) * time_to_expiry) / (
+            volatility * sqrt(time_to_expiry)
+        )
+        d2 = d1 - volatility * sqrt(time_to_expiry)
+        put_price = strike * NormalDist().cdf(-d2) - spot * NormalDist().cdf(-d1)
+        return put_price
+
+    @staticmethod
+    def delta(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        return NormalDist().cdf(d1)
+
+    @staticmethod
+    def gamma(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        return NormalDist().pdf(d1) / (spot * volatility * sqrt(time_to_expiry))
+
+    @staticmethod
+    def vega(spot, strike, time_to_expiry, volatility):
+        d1 = (
+            log(spot) - log(strike) + (0.5 * volatility * volatility) * time_to_expiry
+        ) / (volatility * sqrt(time_to_expiry))
+        # print(f"d1: {d1}")
+        # print(f"vol: {volatility}")
+        # print(f"spot: {spot}")
+        # print(f"strike: {strike}")
+        # print(f"time: {time_to_expiry}")
+        return NormalDist().pdf(d1) * (spot * sqrt(time_to_expiry)) / 100
+
+    @staticmethod
+    def implied_volatility(
+        call_price, spot, strike, time_to_expiry, max_iterations=200, tolerance=1e-10
+    ):
+        low_vol = 0.01
+        high_vol = 1.0
+        volatility = (low_vol + high_vol) / 2.0  # Initial guess as the midpoint
+        for _ in range(max_iterations):
+            estimated_price = BlackScholes.black_scholes_call(
+                spot, strike, time_to_expiry, volatility
+            )
+            diff = estimated_price - call_price
+            if abs(diff) < tolerance:
+                break
+            elif diff > 0:
+                high_vol = volatility
+            else:
+                low_vol = volatility
+            volatility = (low_vol + high_vol) / 2.0
+        return volatility
+
 RAINFOREST_RESIN = "RAINFOREST_RESIN"
 KELP = "KELP"
 SQUID_INK = "SQUID_INK"
@@ -142,6 +210,12 @@ JAMS = "JAMS"
 DJEMBES = "DJEMBES"
 PICNIC_BASKET1 = "PICNIC_BASKET1"
 PICNIC_BASKET2 = "PICNIC_BASKET2"
+LAVA_ROCK = 'LAVA_ROCK'
+LAVA_ROCK_VOUCHER_9500 = 'LAVA_ROCK_VOUCHER_9500'
+LAVA_ROCK_VOUCHER_9750 = 'LAVA_ROCK_VOUCHER_9750'
+LAVA_ROCK_VOUCHER_10000 = 'LAVA_ROCK_VOUCHER_10000'
+LAVA_ROCK_VOUCHER_10250 = 'LAVA_ROCK_VOUCHER_10250'
+LAVA_ROCK_VOUCHER_10500 = 'LAVA_ROCK_VOUCHER_10500'
 
 PRODUCTS = [
     RAINFOREST_RESIN,
@@ -151,7 +225,13 @@ PRODUCTS = [
     JAMS,
     DJEMBES,
     PICNIC_BASKET1,
-    PICNIC_BASKET2
+    PICNIC_BASKET2,
+    LAVA_ROCK,
+    LAVA_ROCK_VOUCHER_9500,
+    LAVA_ROCK_VOUCHER_9750,
+    LAVA_ROCK_VOUCHER_10000,
+    LAVA_ROCK_VOUCHER_10250,
+    LAVA_ROCK_VOUCHER_10500
 ]
 
 DEFAULT_PRICES = {
@@ -974,7 +1054,7 @@ class Trader:
             logger.print(f"Going long on PB1 with order {orders[-1]}")
             orders.append(Order(PICNIC_BASKET2, best_bid_pb2, -2*pkg_amt_indiv))
             logger.print(f"Going short on CR with order {orders[-1]}")
-            orders.append(Order(JAMS, best_bid_djembes, -2*pkg_amt_indiv))
+            orders.append(Order(DJEMBES, best_bid_djembes, -2*pkg_amt_indiv))
             logger.print(f"Going short on JAMS with order {orders[-1]}")
 
         logger.print(f"Returning orders: {orders}") 
@@ -1037,6 +1117,141 @@ class Trader:
         mid_price_indiv = 2*self.get_mid_price(PICNIC_BASKET2, state) + 2*self.get_mid_price(DJEMBES, state)
 
         return mid_price_pb1 - mid_price_indiv
+
+
+    def lava_strat(self, state: TradingState, voucher):
+        orders : List[Order] = []
+
+        strike = 9500
+
+        lava_position = state.position[LAVA_ROCK]
+        lava_voucher_position = state.position[LAVA_ROCK_VOUCHER_9500]
+
+        lava_order_depths = state.order_depths[LAVA_ROCK]
+        lava_voucher_order_depths = state.order_depths[LAVA_ROCK_VOUCHER_9500]
+
+        lava_mid_price = (max(lava_order_depths.buy_orders) - min(lava_order_depths.sell_orders)) / 2
+        lava_voucher_mid_price = self.get_voucher_mid_price(lava_voucher_order_depths, voucher)
+        
+        tte = state.timestamp / (1000000 * 365) + 4/365
+        volatility = BlackScholes.implied_volatility(lava_voucher_mid_price, lava_mid_price, strike, tte)
+        delta = BlackScholes.delta(lava_mid_price, strike, tte, volatility)
+
+        lava_voucher_orders = self.lava_vouchers_orders()
+
+        lava_orders = self.lava_orders()
+
+        return lava_voucher_orders, lava_orders
+
+    def get_voucher_mid_price(self, order_depths, voucher):
+        bb = max(order_depths.buy_orders[voucher])
+        ba = min(order_depths.sell_orders[voucher])
+        mid_price = (bb + ba) / 2
+        return mid_price
+    
+    def lava_vouchers_orders():
+
+        
+    def coconut_orders(
+        self,
+        coconut_order_depth: OrderDepth,
+        coconut_coupon_order_depth: OrderDepth,
+        coconut_coupon_orders: List[Order],
+        coconut_position: int,
+        coconut_coupon_position: int,
+        delta: float
+    ) -> List[Order]:
+        if coconut_coupon_orders == None or len(coconut_coupon_orders) == 0:
+            coconut_coupon_position_after_trade = coconut_coupon_position
+        else:
+            coconut_coupon_position_after_trade = coconut_coupon_position + sum(order.quantity for order in coconut_coupon_orders)
+        
+        target_coconut_position = -delta * coconut_coupon_position_after_trade
+        
+        if target_coconut_position == coconut_position:
+            return None
+        
+        target_coconut_quantity = target_coconut_position - coconut_position
+
+        orders: List[Order] = []
+        if target_coconut_quantity > 0:
+            # Buy COCONUT
+            best_ask = min(coconut_order_depth.sell_orders.keys())
+            quantity = min(
+                abs(target_coconut_quantity),
+                self.LIMIT[Product.COCONUT] - coconut_position,
+            )
+            if quantity > 0:
+                orders.append(Order(Product.COCONUT, best_ask, round(quantity)))
+        
+        elif target_coconut_quantity < 0:
+            # Sell COCONUT
+            best_bid = max(coconut_order_depth.buy_orders.keys())
+            quantity = min(
+                abs(target_coconut_quantity),
+                self.LIMIT[Product.COCONUT] + coconut_position,
+            )
+            if quantity > 0:
+                orders.append(Order(Product.COCONUT, best_bid, -round(quantity)))
+        
+        return orders
+
+    def coconut_coupon_orders(
+        self,
+        coconut_coupon_order_depth: OrderDepth,
+        coconut_coupon_position: int,
+        traderData: Dict[str, Any],
+        volatility: float,
+    ) -> List[Order]:
+        traderData['past_coupon_vol'].append(volatility)
+        if len(traderData['past_coupon_vol']) < self.params[Product.COCONUT_COUPON]['std_window']:
+            return None, None
+
+        if len(traderData['past_coupon_vol']) > self.params[Product.COCONUT_COUPON]['std_window']:
+            traderData['past_coupon_vol'].pop(0)
+        
+        vol_z_score = (volatility - self.params[Product.COCONUT_COUPON]['mean_volatility']) / np.std(traderData['past_coupon_vol'])
+        # print(f"vol_z_score: {vol_z_score}")
+        # print(f"zscore_threshold: {self.params[Product.COCONUT_COUPON]['zscore_threshold']}")
+        if (
+            vol_z_score 
+            >= self.params[Product.COCONUT_COUPON]['zscore_threshold']
+        ):
+            if coconut_coupon_position != -self.LIMIT[Product.COCONUT_COUPON]:
+                target_coconut_coupon_position = -self.LIMIT[Product.COCONUT_COUPON]
+                if len(coconut_coupon_order_depth.buy_orders) > 0:
+                    best_bid = max(coconut_coupon_order_depth.buy_orders.keys())
+                    target_quantity = abs(target_coconut_coupon_position - coconut_coupon_position)
+                    quantity = min(
+                        target_quantity,
+                        abs(coconut_coupon_order_depth.buy_orders[best_bid]),
+                    )
+                    quote_quantity = target_quantity - quantity
+                    if quote_quantity == 0:
+                        return [Order(Product.COCONUT_COUPON, best_bid, -quantity)], []
+                    else:
+                        return [Order(Product.COCONUT_COUPON, best_bid, -quantity)], [Order(Product.COCONUT_COUPON, best_bid, -quote_quantity)]
+
+        elif (
+            vol_z_score
+            <= -self.params[Product.COCONUT_COUPON]["zscore_threshold"]
+        ):
+            if coconut_coupon_position != self.LIMIT[Product.COCONUT_COUPON]:
+                target_coconut_coupon_position = self.LIMIT[Product.COCONUT_COUPON]
+                if len(coconut_coupon_order_depth.sell_orders) > 0:
+                    best_ask = min(coconut_coupon_order_depth.sell_orders.keys())
+                    target_quantity = abs(target_coconut_coupon_position - coconut_coupon_position)
+                    quantity = min(
+                        target_quantity,
+                        abs(coconut_coupon_order_depth.sell_orders[best_ask]),
+                    )
+                    quote_quantity = target_quantity - quantity
+                    if quote_quantity == 0:
+                        return [Order(Product.COCONUT_COUPON, best_ask, quantity)], []
+                    else:
+                        return [Order(Product.COCONUT_COUPON, best_ask, quantity)], [Order(Product.COCONUT_COUPON, best_ask, quote_quantity)]
+
+        return None, None
 
     """
     def kelp_orders(self, order_depth: OrderDepth, timespan:int, width: float, kelp_take_width: float, position: int, position_limit: int) -> List[Order]:
@@ -1164,8 +1379,8 @@ class Trader:
             print(e)"""
 
         
-        '''result[PICNIC_BASKET1] = self.basket_1_strategy(state)
-        result[PICNIC_BASKET2] = self.basket_2_strategy(state)'''
+        result[PICNIC_BASKET1] = self.basket_1_strategy(state)
+        result[PICNIC_BASKET2] = self.basket_2_strategy(state)
         result[PICNIC_BASKET1] = self.basket_basket_strategy(state)
 
         """
