@@ -1138,7 +1138,7 @@ class Trader:
                         quantity = min(abs(VOLCANIC_voucher_order_depths.sell_orders[best_bid]), target_quantity)
                         quote_quantity = target_quantity - quantity
                         if quote_quantity == 0:
-                            return [Order(voucher, best_bid, -quantity)]
+                            return [Order(voucher, best_bid, -quantity)], []
                         else:
                             return [Order(voucher, best_bid, -quantity)], [Order(voucher, best_bid, -quote_quantity)]
             elif iv_residual < -threshold:
@@ -1150,7 +1150,7 @@ class Trader:
                         quantity = min(abs(VOLCANIC_voucher_order_depths.sell_orders[best_ask]), target_quantity)
                         quote_quantity = target_quantity - quantity
                         if quote_quantity == 0:
-                            return [Order(voucher, best_ask, quantity)]
+                            return [Order(voucher, best_ask, quantity)], []
                         else:
                             return [Order(voucher, best_ask, quantity)], [Order(voucher, best_ask, quote_quantity)]
                 
@@ -1164,7 +1164,7 @@ class Trader:
                         quantity = min(abs(VOLCANIC_voucher_order_depths.sell_orders[best_bid]), target_quantity)
                         quote_quantity = target_quantity - quantity
                         if quote_quantity == 0:
-                            return [Order(voucher, best_bid, -quantity)]
+                            return [Order(voucher, best_bid, -quantity)], []
                         else:
                             return [Order(voucher, best_bid, -quantity)], [Order(voucher, best_bid, -quote_quantity)]
             elif iv_residual < -threshold:
@@ -1176,11 +1176,11 @@ class Trader:
                         quantity = min(abs(VOLCANIC_voucher_order_depths.sell_orders[best_ask]), target_quantity)
                         quote_quantity = target_quantity - quantity
                         if quote_quantity == 0:
-                            return [Order(voucher, best_ask, quantity)]
+                            return [Order(voucher, best_ask, quantity)], []
                         else:
                             return [Order(voucher, best_ask, quantity)], [Order(voucher, best_ask, quote_quantity)]
         
-        return None, None
+        return [], []
     
     def calculate_base_iv_zscore(self, current_iv):
         # Maintain rolling window of base IV values
@@ -1371,23 +1371,32 @@ class Trader:
             print("Error in kelp strategy")
             print(e)
 
+        loaded_state = {}
+        if state.traderData:
+            try:
+                decoded_data = jsonpickle.decode(state.traderData, keys=True)
+                if isinstance(decoded_data, dict): loaded_state = decoded_data
+            except Exception as e: logger.print(f"Error decode traderData: {e}")
+        self.trader_state = loaded_state
+
+        # --- Execute Strategy ---
         try:
-            result[SQUID_INK] = self.squid_ink_strategy(state)
+            # Ensure state dict exists for the product
+            self.trader_state.setdefault(SQUID_INK, {'history': [], 'last_ema': None})
+            squid_ink_orders = self.squid_ink_strategy(state)
+            result[SQUID_INK] = squid_ink_orders
         except Exception as e:
-            print("Error in squid ink strategy")
-            print(e)
+            logger.print(f"Error in strategy: {e}"); logger.print(traceback.format_exc())
+            result[SQUID_INK] = []
+
+        # --- Save Trader State ---
+        try: traderData = jsonpickle.encode(self.trader_state, keys=True)
+        except Exception as e: logger.print(f"Error encode traderData: {e}"); traderData = ""
 
         
         result[PICNIC_BASKET1] = self.basket_1_strategy(state)
         result[PICNIC_BASKET2] = self.basket_2_strategy(state)
         #result[PICNIC_BASKET1] = self.basket_basket_strategy(state)
-
-        
-        if KELP in state.order_depths:
-            kelp_position = state.position[KELP] if KELP in state.position else 0
-            kelp_orders = self.kelp_strategy(state)
-            #self.kelp_orders(state.order_depths["KELP"], kelp_timespan, kelp_make_width, kelp_take_width, kelp_position, kelp_position_limit)
-            result[KELP] = kelp_orders
 
         
         traderData = jsonpickle.encode( {"pb1_ema": self.pb1_ema, "pb1_std_dev": self.pb1_std_dev} )
